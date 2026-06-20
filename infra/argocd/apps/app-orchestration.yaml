@@ -1,0 +1,81 @@
+# ArgoCD Application : pipeline-orchestration
+# Déploie : Prefect Server + MLflow + PostgreSQL (backend store)
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pipeline-orchestration
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app: air-decarb-pipeline
+    tier: orchestration
+  annotations:
+    # Notifications ArgoCD (Slack, etc.)
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: "pipeline-alerts"  # <-- CHANGE ME
+spec:
+  project: air-decarb-pipeline
+
+  source:
+    repoURL: https://github.com/org/air-decarb-gitops.git   # <-- CHANGE ME
+    targetRevision: main
+    path: helm/orchestration
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-ocp.yaml           # Overrides spécifiques OCP (SCC, routes...)
+      parameters:
+        # Prefect Server
+        - name: prefect.server.image.tag
+          value: "3-latest"
+        - name: prefect.server.replicaCount
+          value: "1"
+
+        # MLflow
+        - name: mlflow.image.tag
+          value: "latest"
+        - name: mlflow.artifactRoot
+          value: "s3://mlflow-artifacts"
+        - name: mlflow.backendStore
+          value: "postgresql+psycopg2://mlflow:$(MLFLOW_DB_PASSWORD)@postgres-svc:5432/mlflow"
+
+        # PostgreSQL (backend Prefect + MLflow)
+        - name: postgresql.auth.database
+          value: "pipeline"
+        - name: postgresql.primary.persistence.size
+          value: "10Gi"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: pipeline-orchestration
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true        # Nécessaire pour les CRDs Prefect/Tekton
+      - ApplyOutOfSyncOnly=true     # Optimisation : ne re-synce que ce qui a changé
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+
+  # Ignorer les champs gérés dynamiquement par OCP/Prefect
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      jsonPointers:
+        - /data                     # Secrets générés par les operators
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+    - group: route.openshift.io
+      kind: Route
+      jsonPointers:
+        - /spec/host                # Hostname assigné automatiquement par OCP

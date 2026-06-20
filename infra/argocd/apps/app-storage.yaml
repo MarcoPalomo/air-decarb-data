@@ -1,0 +1,102 @@
+# ArgoCD Application : pipeline-storage
+# Déploie : MinIO (ODF) + TimescaleDB + Nessie (catalog Iceberg)
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pipeline-storage
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app: air-decarb-pipeline
+    tier: storage
+spec:
+  project: air-decarb-pipeline
+
+  source:
+    repoURL: https://github.com/org/air-decarb-gitops.git   # <-- CHANGE ME
+    targetRevision: main
+    path: helm/storage
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-ocp.yaml
+      parameters:
+        # ── MinIO ────────────────────────────────────────────────────────────
+        # MinIO est géré via ODF (OpenShift Data Foundation) en production.
+        # Ce chart déploie un MinIO standalone pour dev/staging.
+        - name: minio.mode
+          value: "standalone"
+        - name: minio.persistence.size
+          value: "200Gi"
+        - name: minio.persistence.storageClass
+          value: "ocs-storagecluster-ceph-rbd"   # <-- CHANGE ME (StorageClass OCP)
+        - name: minio.buckets[0].name
+          value: "raw"
+        - name: minio.buckets[1].name
+          value: "iceberg"
+        - name: minio.buckets[2].name
+          value: "mlflow-artifacts"
+        - name: minio.buckets[3].name
+          value: "cache"
+
+        # ── Nessie (Iceberg REST Catalog) ─────────────────────────────────
+        - name: nessie.replicaCount
+          value: "1"
+        - name: nessie.image.tag
+          value: "0.80.0"
+        - name: nessie.persistence.type
+          value: "JDBC"            # PostgreSQL backend (partagé avec orchestration)
+        - name: nessie.jdbc.url
+          value: "jdbc:postgresql://postgres-svc.pipeline-orchestration.svc:5432/nessie"
+        - name: nessie.catalog.iceberg.defaultWarehouse
+          value: "s3://iceberg"
+        - name: nessie.catalog.iceberg.s3.endpoint
+          value: "http://minio-svc:9000"
+
+        # ── TimescaleDB ───────────────────────────────────────────────────
+        - name: timescaledb.replicaCount
+          value: "1"                # Passer à 3 en prod (HA)
+        - name: timescaledb.persistence.size
+          value: "50Gi"
+        - name: timescaledb.persistence.storageClass
+          value: "ocs-storagecluster-ceph-rbd"   # <-- CHANGE ME
+        - name: timescaledb.image.tag
+          value: "2.14.2-pg16"
+        - name: timescaledb.resources.requests.memory
+          value: "2Gi"
+        - name: timescaledb.resources.requests.cpu
+          value: "1"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: pipeline-storage
+
+  syncPolicy:
+    automated:
+      prune: false          # NE PAS pruner le storage automatiquement — risque de perte de données
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s       # Délai plus long : les StatefulSets prennent du temps
+        factor: 2
+        maxDuration: 10m
+
+  ignoreDifferences:
+    # TimescaleDB : secrets de mot de passe générés à la première installation
+    - group: ""
+      kind: Secret
+      name: timescaledb-credentials
+      jsonPointers:
+        - /data
+    # MinIO : config générée par l'operator ODF
+    - group: objectbucket.io
+      kind: ObjectBucketClaim
+      jsonPointers:
+        - /status

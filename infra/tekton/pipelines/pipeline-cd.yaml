@@ -1,0 +1,134 @@
+# Pipeline Tekton CD — lint → test → build → push → update GitOps
+# Déclenché uniquement sur merge vers main
+# Met à jour le repo GitOps → ArgoCD détecte et synce le cluster
+
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: pipeline-cd
+  namespace: pipeline-cicd
+  labels:
+    app: air-decarb-pipeline
+    pipeline-type: cd
+spec:
+  description: |
+    CD pipeline : lint + tests + build image + mise à jour repo GitOps.
+    ArgoCD prend le relais pour le déploiement sur OCP.
+
+  workspaces:
+    - name: shared-workspace
+      description: Code source
+    - name: docker-credentials
+      description: Credentials registry OCP
+    - name: gitops-workspace
+      description: Workspace pour le repo GitOps (séparé du source)
+    - name: ssh-credentials
+      description: Clé SSH pour push GitOps
+
+  params:
+    - name: git-url
+      type: string
+      default: "https://github.com/org/air-decarb-data.git"  # <-- CHANGE ME
+    - name: git-revision
+      type: string
+      default: "main"
+    - name: git-sha-short
+      type: string
+      description: SHA court du commit (8 chars) — utilisé comme tag image
+      default: "latest"
+    - name: image-name
+      type: string
+      default: "image-registry.openshift-image-registry.svc:5000/pipeline-cicd/worker"  # <-- CHANGE ME
+    - name: gitops-repo-url
+      type: string
+      default: "git@github.com:org/air-decarb-gitops.git"  # <-- CHANGE ME
+
+  tasks:
+    # ── 1. Clone source ───────────────────────────────────────────────────────
+    - name: git-clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: depth
+          value: "1"
+
+    # ── 2. Lint ───────────────────────────────────────────────────────────────
+    - name: lint
+      taskRef:
+        kind: Task
+        name: lint-python
+      runAfter: [git-clone]
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    # ── 3. Tests unitaires ────────────────────────────────────────────────────
+    - name: unit-tests
+      taskRef:
+        kind: Task
+        name: test-unit
+      runAfter: [lint]
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: coverage-threshold
+          value: "80"
+
+    # ── 4. Build + Push image ─────────────────────────────────────────────────
+    - name: build-push
+      taskRef:
+        kind: Task
+        name: build-push
+      runAfter: [unit-tests]
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: dockerconfig
+          workspace: docker-credentials
+      params:
+        - name: image
+          value: $(params.image-name)
+        - name: image-tag
+          value: $(params.git-sha-short)
+        - name: dockerfile
+          value: "infra/docker/Dockerfile.worker"
+
+    # ── 5. Update GitOps repo ─────────────────────────────────────────────────
+    - name: update-gitops
+      taskRef:
+        kind: Task
+        name: update-gitops
+      runAfter: [build-push]
+      workspaces:
+        - name: gitops-repo
+          workspace: gitops-workspace
+        - name: ssh-credentials
+          workspace: ssh-credentials
+      params:
+        - name: gitops-repo-url
+          value: $(params.gitops-repo-url)
+        - name: image-tag
+          value: $(params.git-sha-short)
+        - name: component
+          value: "worker"
+
+  results:
+    - name: image-digest
+      value: $(tasks.build-push.results.image-digest)
+    - name: image-url
+      value: $(tasks.build-push.results.image-url)

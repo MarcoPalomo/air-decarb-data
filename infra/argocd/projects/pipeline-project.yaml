@@ -1,0 +1,82 @@
+# AppProject ArgoCD — périmètre de sécurité pour la plateforme pipeline
+# Limite les repos sources, les destinations et les ressources autorisées
+
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: air-decarb-pipeline
+  namespace: openshift-gitops   # Namespace ArgoCD sur OCP
+  # Finalizer : empêche la suppression si des Apps sont encore actives
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "Plateforme data air quality & decarbonisation"
+
+  # Repos sources autorisés (code source + GitOps)
+  sourceRepos:
+    - "https://github.com/org/air-decarb-data.git"       # <-- CHANGE ME
+    - "https://github.com/org/air-decarb-gitops.git"     # <-- CHANGE ME (repo GitOps)
+    - "https://charts.helm.sh/stable"
+    - "https://charts.bitnami.com/bitnami"
+    - "https://nessie.projectnessie.org/helm"
+    - "https://charts.min.io"
+    - "https://charts.timescale.com"
+    - "https://prefecthq.github.io/prefect-helm"
+    - "https://community-charts.github.io/helm-charts"   # mlflow
+
+  # Namespaces de destination autorisés
+  destinations:
+    - server: https://kubernetes.default.svc              # Cluster OCP local
+      namespace: pipeline-cicd
+    - server: https://kubernetes.default.svc
+      namespace: pipeline-orchestration
+    - server: https://kubernetes.default.svc
+      namespace: pipeline-compute
+    - server: https://kubernetes.default.svc
+      namespace: pipeline-storage
+
+  # Ressources Kubernetes autorisées (whitelist)
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRole
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  # Namespaceresource blacklist : empêcher de modifier les composants système
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota       # Géré par les admins OCP uniquement
+    - group: ""
+      kind: LimitRange
+
+  # Sync policies autorisées
+  syncWindows:
+    - kind: allow
+      schedule: "* * * * *"    # Sync autorisé à tout moment (ajuster si besoin)
+      duration: 24h
+      applications:
+        - "*"
+      manualSync: true
+
+  # Rôles projet ArgoCD
+  roles:
+    - name: pipeline-deployer
+      description: "Peut sync les apps du projet pipeline"
+      policies:
+        - p, proj:air-decarb-pipeline:pipeline-deployer, applications, sync, air-decarb-pipeline/*, allow
+        - p, proj:air-decarb-pipeline:pipeline-deployer, applications, get, air-decarb-pipeline/*, allow
+      groups:
+        - "pipeline-devs"       # <-- CHANGE ME : groupe LDAP/SSO
+
+    - name: pipeline-viewer
+      description: "Lecture seule sur les apps du projet"
+      policies:
+        - p, proj:air-decarb-pipeline:pipeline-viewer, applications, get, air-decarb-pipeline/*, allow
+      groups:
+        - "pipeline-viewers"    # <-- CHANGE ME

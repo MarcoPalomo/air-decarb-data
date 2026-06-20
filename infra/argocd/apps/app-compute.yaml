@@ -1,0 +1,82 @@
+# ArgoCD Application : pipeline-compute
+# Déploie : RBAC du namespace worker + configuration du Kubernetes Work Pool Prefect
+# Note : les pods workers eux-mêmes sont créés dynamiquement par Prefect (Jobs éphémères)
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pipeline-compute
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app: air-decarb-pipeline
+    tier: compute
+spec:
+  project: air-decarb-pipeline
+
+  source:
+    repoURL: https://github.com/org/air-decarb-gitops.git   # <-- CHANGE ME
+    targetRevision: main
+    path: helm/compute
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-ocp.yaml
+      parameters:
+        # Image worker (mise à jour par Tekton CD)
+        - name: worker.image.repository
+          value: "image-registry.openshift-image-registry.svc:5000/pipeline-cicd/worker"  # <-- CHANGE ME
+        - name: worker.image.tag
+          value: "latest"          # Tekton met à jour ce champ via update-gitops task
+
+        # Resources par défaut du pod worker (Prefect Kubernetes Work Pool)
+        - name: worker.resources.requests.memory
+          value: "4Gi"
+        - name: worker.resources.requests.cpu
+          value: "2"
+        - name: worker.resources.limits.memory
+          value: "16Gi"
+        - name: worker.resources.limits.cpu
+          value: "8"
+
+        # Volume temp pour DuckDB spill-to-disk
+        - name: worker.volumes.duckdbSpill.sizeLimit
+          value: "20Gi"
+
+        # ServiceAccount + RBAC worker
+        - name: rbac.serviceAccountName
+          value: "pipeline-worker-sa"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: pipeline-compute
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 2m
+
+  ignoreDifferences:
+    # Les Jobs éphémères Prefect — ArgoCD ne doit pas les toucher
+    - group: "batch"
+      kind: Job
+      jsonPointers:
+        - /spec
+        - /status
+    # Les Pods de travail Prefect
+    - group: ""
+      kind: Pod
+      jsonPointers:
+        - /metadata
+        - /spec
+        - /status

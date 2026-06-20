@@ -1,0 +1,45 @@
+# TriggerBinding — extrait les données du payload webhook GitHub/GitLab
+# Mappe les champs JSON du webhook vers des paramètres Tekton
+
+---
+# Binding pour les push events (branch push ou merge vers main)
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: git-push-binding
+  namespace: pipeline-cicd
+spec:
+  params:
+    # GitHub push event
+    - name: git-url
+      value: $(body.repository.clone_url)
+    - name: git-revision
+      value: $(body.after)         # SHA complet du commit
+    - name: git-sha-short
+      value: $(body.after[0:8])    # 8 premiers chars du SHA
+    - name: git-branch
+      value: $(body.ref)           # ex: refs/heads/main
+    - name: git-repo-name
+      value: $(body.repository.name)
+
+---
+# Binding pour les Pull Request events
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: git-pr-binding
+  namespace: pipeline-cicd
+spec:
+  params:
+    - name: git-url
+      value: $(body.pull_request.head.repo.clone_url)
+    - name: git-revision
+      value: $(body.pull_request.head.sha)
+    - name: git-sha-short
+      value: $(body.pull_request.head.sha[0:8])
+    - name: git-branch
+      value: $(body.pull_request.head.ref)
+    - name: pr-number
+      value: $(body.number)
+    - name: pr-action
+      value: $(body.action)       # opened, synchronize, closed...

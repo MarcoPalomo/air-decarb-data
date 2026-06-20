@@ -1,0 +1,119 @@
+# TriggerTemplate — crée les PipelineRuns à partir des événements git
+# Deux templates : CI (PR/push branche) et CD (merge main)
+
+---
+# Template CI : déclenché sur push vers n'importe quelle branche
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: pipeline-ci-template
+  namespace: pipeline-cicd
+spec:
+  params:
+    - name: git-url
+    - name: git-revision
+    - name: git-sha-short
+    - name: git-branch
+
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: pipeline-ci-run-
+        namespace: pipeline-cicd
+        labels:
+          tekton.dev/pipeline: pipeline-ci
+          git-branch: $(tt.params.git-branch)
+        annotations:
+          # Affiche le SHA dans l'UI Tekton
+          tekton.dev/git-commit: $(tt.params.git-sha-short)
+      spec:
+        pipelineRef:
+          name: pipeline-ci
+        serviceAccountName: pipeline-sa
+
+        # PVC partagé entre les tasks (ReadWriteOnce suffit — 1 pod à la fois)
+        workspaces:
+          - name: shared-workspace
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 2Gi
+          - name: docker-credentials
+            secret:
+              secretName: pipeline-registry-secret
+
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-revision
+            value: $(tt.params.git-revision)
+          - name: image-tag
+            value: $(tt.params.git-sha-short)
+
+        # Timeout global du run CI
+        timeouts:
+          pipeline: 30m
+
+---
+# Template CD : déclenché sur push vers main seulement
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: pipeline-cd-template
+  namespace: pipeline-cicd
+spec:
+  params:
+    - name: git-url
+    - name: git-revision
+    - name: git-sha-short
+
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: pipeline-cd-run-
+        namespace: pipeline-cicd
+        labels:
+          tekton.dev/pipeline: pipeline-cd
+        annotations:
+          tekton.dev/git-commit: $(tt.params.git-sha-short)
+      spec:
+        pipelineRef:
+          name: pipeline-cd
+        serviceAccountName: pipeline-sa
+
+        workspaces:
+          - name: shared-workspace
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 2Gi
+          - name: docker-credentials
+            secret:
+              secretName: pipeline-registry-secret
+          - name: gitops-workspace
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 500Mi
+          - name: ssh-credentials
+            secret:
+              secretName: gitops-ssh-key
+
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-revision
+            value: $(tt.params.git-revision)
+          - name: git-sha-short
+            value: $(tt.params.git-sha-short)
+
+        timeouts:
+          pipeline: 45m

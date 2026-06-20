@@ -1,0 +1,94 @@
+# RBAC — namespace pipeline-cicd
+# ServiceAccount Tekton + droits pour créer des PipelineRuns et lire le registry OCP
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipeline-sa
+  namespace: pipeline-cicd
+
+---
+# Accès au registry interne OCP (push d'images)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pipeline-registry-secret
+  namespace: pipeline-cicd
+  annotations:
+    tekton.dev/docker-0: image-registry.openshift-image-registry.svc:5000
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: ""   # <-- CHANGE ME : base64({"auths":{...}})
+
+---
+# Lier le secret registry au SA
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipeline-sa
+  namespace: pipeline-cicd
+secrets:
+  - name: pipeline-registry-secret
+
+---
+# Role : gérer les PipelineRuns et lire les secrets CI
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-role
+  namespace: pipeline-cicd
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns", "taskruns", "pipelines", "tasks"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames:
+      - "git-credentials"
+      - "gitops-ssh-key"
+      - "pipeline-registry-secret"
+  - apiGroups: [""]
+    resources: ["configmaps", "pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete", "get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-rolebinding
+  namespace: pipeline-cicd
+subjects:
+  - kind: ServiceAccount
+    name: pipeline-sa
+    namespace: pipeline-cicd
+roleRef:
+  kind: Role
+  name: pipeline-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Secret pour le token git (webhook Tekton Trigger)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: git-webhook-secret
+  namespace: pipeline-cicd
+type: Opaque
+stringData:
+  secret: ""   # <-- CHANGE ME : token secret partagé avec le webhook GitHub/GitLab
+
+---
+# Secret SSH pour pusher vers le repo GitOps (ArgoCD)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitops-ssh-key
+  namespace: pipeline-cicd
+type: kubernetes.io/ssh-auth
+data:
+  ssh-privatekey: ""   # <-- CHANGE ME : base64(clé SSH privée)

@@ -1,0 +1,45 @@
+# App-of-Apps ArgoCD — application racine qui gère toutes les autres
+# Pattern recommandé : une seule application à créer manuellement,
+# elle déploie automatiquement toutes les apps enfants depuis le repo GitOps
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: air-decarb-root
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app: air-decarb-pipeline
+    tier: root
+spec:
+  project: air-decarb-pipeline
+
+  source:
+    repoURL: https://github.com/org/air-decarb-gitops.git   # <-- CHANGE ME
+    targetRevision: main
+    path: argocd/apps                    # Dossier contenant les apps enfants
+    directory:
+      recurse: false
+      include: "app-*.yaml"             # Toutes les apps enfants (sauf cette racine)
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+
+  syncPolicy:
+    automated:
+      prune: true       # Supprimer les ressources supprimées du repo
+      selfHeal: true    # Re-sync si état cluster diverge du repo
+    syncOptions:
+      - CreateNamespace=false           # Les namespaces sont créés séparément
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  revisionHistoryLimit: 5

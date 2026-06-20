@@ -1,0 +1,92 @@
+# EventListener Tekton — reçoit les webhooks GitHub/GitLab
+# Expose un Service + Route OCP pour les callbacks git
+# Applique les Triggers selon la branche (CI vs CD)
+
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: git-webhook-listener
+  namespace: pipeline-cicd
+  labels:
+    app: air-decarb-pipeline
+spec:
+  serviceAccountName: pipeline-sa
+
+  triggers:
+    # ── Trigger CI : push vers n'importe quelle branche sauf main ─────────────
+    - name: ci-branch-push
+      interceptors:
+        # Valider le secret webhook (HMAC SHA256)
+        - ref:
+            name: github
+          params:
+            - name: secretRef
+              value:
+                secretName: git-webhook-secret
+                secretKey: secret
+            - name: eventTypes
+              value: ["push"]
+
+        # Filtre : exclure les pushes vers main (géré par ci-main-push)
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: >
+                body.ref != 'refs/heads/main' &&
+                body.ref != 'refs/heads/master' &&
+                body.after != '0000000000000000000000000000000000000000'
+
+      bindings:
+        - ref: git-push-binding
+      template:
+        ref: pipeline-ci-template
+
+    # ── Trigger CD : push vers main (merge PR) ────────────────────────────────
+    - name: cd-main-push
+      interceptors:
+        - ref:
+            name: github
+          params:
+            - name: secretRef
+              value:
+                secretName: git-webhook-secret
+                secretKey: secret
+            - name: eventTypes
+              value: ["push"]
+
+        # Filtre : seulement les pushes vers main
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: >
+                (body.ref == 'refs/heads/main' ||
+                 body.ref == 'refs/heads/master') &&
+                body.after != '0000000000000000000000000000000000000000'
+
+      bindings:
+        - ref: git-push-binding
+      template:
+        ref: pipeline-cd-template
+
+---
+# Route OCP pour exposer l'EventListener à GitHub/GitLab
+# URL à configurer dans les webhooks git : https://<route-host>/
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: git-webhook-route
+  namespace: pipeline-cicd
+  annotations:
+    # Désactiver le rate limiting pour les webhooks
+    haproxy.router.openshift.io/timeout: 120s
+spec:
+  to:
+    kind: Service
+    name: el-git-webhook-listener    # Service créé automatiquement par l'EventListener
+  port:
+    targetPort: http-listener
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

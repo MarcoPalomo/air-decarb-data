@@ -1,0 +1,106 @@
+# Task Tekton : build image OCI avec Buildah et push vers le registry OCP interne
+# Utilise buildah (natif OCP) — pas de Docker daemon requis
+
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-push
+  namespace: pipeline-cicd
+spec:
+  workspaces:
+    - name: source
+      description: Code source cloné
+    - name: dockerconfig
+      description: Secret dockerconfig pour le registry
+      optional: true
+
+  params:
+    - name: image
+      type: string
+      description: |
+        Image complète à builder et pousser.
+        Ex: image-registry.openshift-image-registry.svc:5000/pipeline-cicd/worker
+    - name: image-tag
+      type: string
+      default: "latest"
+    - name: dockerfile
+      type: string
+      default: "infra/docker/Dockerfile.worker"
+    - name: context
+      type: string
+      default: "."
+      description: Contexte de build (relatif au workspace source)
+    - name: build-args
+      type: array
+      default: []
+      description: Arguments supplémentaires pour buildah bud
+
+  results:
+    - name: image-digest
+      description: Digest SHA de l'image buildée
+    - name: image-url
+      description: URL complète image:tag
+
+  stepTemplate:
+    securityContext:
+      # Buildah requiert des capabilities supplémentaires sur OCP
+      # SCC 'privileged' ou custom buildah-scc nécessaire pour ce SA
+      runAsUser: 0
+    env:
+      - name: DOCKER_CONFIG
+        value: /workspace/dockerconfig
+
+  steps:
+    - name: build
+      image: registry.redhat.io/rhel8/buildah:latest
+      workingDir: $(workspaces.source.path)
+      args: ["$(params.build-args[*])"]
+      script: |
+        #!/bin/bash
+        set -e
+
+        IMAGE_FULL="$(params.image):$(params.image-tag)"
+        echo "=== Build : ${IMAGE_FULL} ==="
+        echo "=== Dockerfile : $(params.dockerfile) ==="
+
+        buildah bud \
+          --format=oci \
+          --tls-verify=false \
+          --file=$(params.dockerfile) \
+          --tag="${IMAGE_FULL}" \
+          $(params.context)
+
+        echo "✓ Build OK"
+
+    - name: tag-sha
+      image: registry.redhat.io/rhel8/buildah:latest
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        # Tag supplémentaire avec le SHA git (injecté comme label)
+        GIT_SHA=$(cat /workspace/source/.git/HEAD 2>/dev/null | head -c 8 || echo "unknown")
+        buildah tag \
+          "$(params.image):$(params.image-tag)" \
+          "$(params.image):${GIT_SHA}"
+        echo "Tagged: $(params.image):${GIT_SHA}"
+
+    - name: push
+      image: registry.redhat.io/rhel8/buildah:latest
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+
+        IMAGE_FULL="$(params.image):$(params.image-tag)"
+        echo "=== Push : ${IMAGE_FULL} ==="
+
+        buildah push \
+          --tls-verify=false \
+          --digestfile=/tmp/image-digest \
+          "${IMAGE_FULL}"
+
+        DIGEST=$(cat /tmp/image-digest)
+        echo -n "${DIGEST}" > $(results.image-digest.path)
+        echo -n "${IMAGE_FULL}" > $(results.image-url.path)
+        echo "✓ Push OK — digest: ${DIGEST}"

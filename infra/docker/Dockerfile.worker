@@ -1,0 +1,38 @@
+# Image worker Prefect — exécute les flows de la pipeline environnementale
+# Build : buildah bud -f infra/docker/Dockerfile.worker -t worker:latest .
+# Contexte de build : racine du repo (air-decarb-data/)
+
+FROM python:3.11-slim AS base
+
+# ── Dépendances système ────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl libpq5 libxml2 proj-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ── Dépendances Python (layer cachée séparément du code) ──────────────────────
+COPY infra/docker/requirements-worker.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ── Code source de la pipeline ─────────────────────────────────────────────────
+COPY pipeline/ ./pipeline/
+COPY dataverse_files.zip ./
+
+# ── Utilisateur non-root (requis par OCP SCC restricted-v2) ───────────────────
+RUN useradd -m -u 1000 -s /bin/bash worker \
+    && chown -R worker:worker /app
+
+USER 1000
+
+# ── Répertoires writables (ReadOnlyRootFilesystem=true dans les pods OCP) ─────
+# /tmp est monté comme emptyDir dans les manifests Kubernetes
+ENV TMPDIR=/tmp
+ENV DUCKDB_TEMP_DIR=/tmp/duckdb_spill
+
+# Vérification des imports critiques au build
+RUN python -c "from pipeline.families.decarb import fetch_edgar_emissions; print('OK')"
+
+# Prefect worker entrypoint
+# La commande réelle est injectée par le Kubernetes Work Pool Prefect
+CMD ["python", "-m", "prefect", "worker", "start", "--pool", "k8s-pool"]

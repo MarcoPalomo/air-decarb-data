@@ -1,0 +1,82 @@
+# Task Tekton : tests unitaires pytest (sans intégration réseau)
+# Produit un rapport JUnit XML pour le tableau de bord Tekton
+
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: test-unit
+  namespace: pipeline-cicd
+spec:
+  workspaces:
+    - name: source
+      description: Code source cloné
+
+  params:
+    - name: python-version
+      type: string
+      default: "3.11"
+    - name: coverage-threshold
+      type: string
+      default: "80"
+      description: Couverture minimale requise (%)
+    - name: test-markers
+      type: string
+      default: "not integration and not slow"
+      description: Marqueurs pytest à inclure/exclure
+
+  results:
+    - name: test-count
+      description: Nombre de tests exécutés
+    - name: coverage-pct
+      description: Pourcentage de couverture atteint
+
+  steps:
+    - name: install-deps
+      image: python:$(params.python-version)-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        echo "=== Installation des dépendances ==="
+        pip install --quiet \
+          pytest pytest-cov pytest-mock responses \
+          requests pandas pyarrow \
+          freezegun
+
+    - name: run-tests
+      image: python:$(params.python-version)-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        echo "=== Tests unitaires (marqueurs: $(params.test-markers)) ==="
+        pytest pipeline/tests/ \
+          -m "$(params.test-markers)" \
+          --cov=pipeline \
+          --cov-report=xml:/workspace/source/coverage.xml \
+          --cov-report=term-missing \
+          --junit-xml=/workspace/source/test-results.xml \
+          --tb=short \
+          -v 2>&1 | tee /tmp/pytest-output.txt
+
+        # Extraire le nombre de tests
+        TESTS=$(grep -oP '\d+ passed' /tmp/pytest-output.txt | grep -oP '\d+' | tail -1)
+        echo -n "${TESTS:-0}" > $(results.test-count.path)
+
+    - name: check-coverage
+      image: python:$(params.python-version)-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        echo "=== Vérification couverture >= $(params.coverage-threshold)% ==="
+        python -m coverage report \
+          --data-file=.coverage \
+          --fail-under=$(params.coverage-threshold) \
+          --skip-covered
+
+        # Extraire le % de couverture
+        COVERAGE=$(python -m coverage report --data-file=.coverage | \
+                   grep TOTAL | awk '{print $NF}' | tr -d '%')
+        echo -n "${COVERAGE:-0}" > $(results.coverage-pct.path)
+        echo "✓ Couverture : ${COVERAGE}%"

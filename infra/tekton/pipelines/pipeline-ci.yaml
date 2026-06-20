@@ -1,0 +1,147 @@
+# Pipeline Tekton CI — lint → test → build → push
+# Déclenché sur chaque push (PR ou branche feature)
+# Ne met PAS à jour le repo GitOps (réservé à pipeline-cd.yaml sur merge main)
+
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: pipeline-ci
+  namespace: pipeline-cicd
+  labels:
+    app: air-decarb-pipeline
+    pipeline-type: ci
+spec:
+  description: |
+    CI pipeline : lint + tests unitaires + build image.
+    Ne déploie pas (pas de mise à jour GitOps).
+
+  workspaces:
+    - name: shared-workspace
+      description: Workspace partagé entre toutes les tasks (code source)
+    - name: docker-credentials
+      description: Secret dockerconfig pour le push registry
+
+  params:
+    - name: git-url
+      type: string
+      description: URL du repo source
+      default: "https://github.com/org/air-decarb-data.git"  # <-- CHANGE ME
+    - name: git-revision
+      type: string
+      description: Branch, tag ou SHA à builder
+      default: "main"
+    - name: image-name
+      type: string
+      description: Nom de l'image (sans tag)
+      default: "image-registry.openshift-image-registry.svc:5000/pipeline-cicd/worker"  # <-- CHANGE ME
+    - name: image-tag
+      type: string
+      description: Tag de l'image (SHA court du commit)
+      default: "dev"
+
+  tasks:
+    # ── 1. Clone ──────────────────────────────────────────────────────────────
+    - name: git-clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone        # Task fournie par OpenShift Pipelines
+          - name: namespace
+            value: openshift-pipelines
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: depth
+          value: "1"
+        - name: deleteExisting
+          value: "true"
+
+    # ── 2. Lint ───────────────────────────────────────────────────────────────
+    - name: lint
+      taskRef:
+        kind: Task
+        name: lint-python
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: source-dir
+          value: "pipeline"
+
+    # ── 3. Tests unitaires ────────────────────────────────────────────────────
+    - name: unit-tests
+      taskRef:
+        kind: Task
+        name: test-unit
+      runAfter:
+        - lint
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: coverage-threshold
+          value: "80"
+        - name: test-markers
+          value: "not integration and not slow"
+
+    # ── 4. Build image ────────────────────────────────────────────────────────
+    - name: build-image
+      taskRef:
+        kind: Task
+        name: build-push
+      runAfter:
+        - unit-tests
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: dockerconfig
+          workspace: docker-credentials
+      params:
+        - name: image
+          value: $(params.image-name)
+        - name: image-tag
+          value: $(params.image-tag)
+        - name: dockerfile
+          value: "infra/docker/Dockerfile.worker"
+
+  # Résultats exposés par le pipeline
+  results:
+    - name: image-digest
+      description: Digest de l'image buildée
+      value: $(tasks.build-image.results.image-digest)
+    - name: image-url
+      description: URL complète de l'image
+      value: $(tasks.build-image.results.image-url)
+    - name: test-count
+      description: Nombre de tests passés
+      value: $(tasks.unit-tests.results.test-count)
+    - name: coverage-pct
+      description: Couverture de code
+      value: $(tasks.unit-tests.results.coverage-pct)
+
+  # Gestion des échecs
+  finally:
+    - name: notify-status
+      taskSpec:
+        params:
+          - name: pipeline-status
+        steps:
+          - name: log
+            image: alpine:3.18
+            script: |
+              echo "Pipeline CI terminée : $(params.pipeline-status)"
+              echo "Tests: $(tasks.unit-tests.results.test-count)"
+              echo "Couverture: $(tasks.unit-tests.results.coverage-pct)%"
+      params:
+        - name: pipeline-status
+          value: "$(tasks.unit-tests.status)"

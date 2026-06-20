@@ -1,0 +1,101 @@
+# Task Tekton : mise à jour du repo GitOps après un build réussi
+# Modifie le tag d'image dans le repo Helm/Kustomize → ArgoCD détecte et synce
+
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-gitops
+  namespace: pipeline-cicd
+spec:
+  workspaces:
+    - name: gitops-repo
+      description: Repo GitOps cloné (manifests Helm/Kustomize)
+    - name: ssh-credentials
+      description: Clé SSH pour push vers le repo GitOps
+
+  params:
+    - name: gitops-repo-url
+      type: string
+      description: URL SSH du repo GitOps  # <-- CHANGE ME
+      default: "git@github.com:org/air-decarb-gitops.git"
+    - name: gitops-branch
+      type: string
+      default: "main"
+    - name: image-tag
+      type: string
+      description: Nouveau tag d'image à injecter (SHA du commit source)
+    - name: component
+      type: string
+      default: "worker"
+      description: Composant à mettre à jour (worker | prefect | mlflow)
+    - name: git-user-name
+      type: string
+      default: "tekton-bot"
+    - name: git-user-email
+      type: string
+      default: "tekton@pipeline-cicd.svc"
+
+  steps:
+    - name: git-config
+      image: bitnami/git:latest
+      script: |
+        #!/bin/bash
+        set -e
+        mkdir -p ~/.ssh
+        cp $(workspaces.ssh-credentials.path)/ssh-privatekey ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+        git config --global user.name "$(params.git-user-name)"
+        git config --global user.email "$(params.git-user-email)"
+
+    - name: clone-gitops
+      image: bitnami/git:latest
+      workingDir: $(workspaces.gitops-repo.path)
+      script: |
+        #!/bin/bash
+        set -e
+        git clone --depth=1 --branch $(params.gitops-branch) \
+          $(params.gitops-repo-url) .
+        echo "✓ GitOps repo cloné"
+
+    - name: update-image-tag
+      image: mikefarah/yq:latest
+      workingDir: $(workspaces.gitops-repo.path)
+      script: |
+        #!/bin/bash
+        set -e
+
+        COMPONENT="$(params.component)"
+        NEW_TAG="$(params.image-tag)"
+        VALUES_FILE="helm/${COMPONENT}/values.yaml"
+
+        echo "=== Mise à jour tag image ${COMPONENT} → ${NEW_TAG} ==="
+
+        if [ ! -f "${VALUES_FILE}" ]; then
+          echo "ERREUR: ${VALUES_FILE} introuvable"
+          exit 1
+        fi
+
+        # Mise à jour du tag dans le fichier values Helm
+        yq e ".image.tag = \"${NEW_TAG}\"" -i "${VALUES_FILE}"
+
+        echo "✓ ${VALUES_FILE} mis à jour"
+        grep "tag:" "${VALUES_FILE}"
+
+    - name: commit-and-push
+      image: bitnami/git:latest
+      workingDir: $(workspaces.gitops-repo.path)
+      script: |
+        #!/bin/bash
+        set -e
+
+        git add .
+        git diff --staged --quiet && echo "Aucun changement à commiter" && exit 0
+
+        git commit -m "chore(cd): update $(params.component) image to $(params.image-tag)
+
+        Automated by Tekton pipeline-cd
+        Triggered by: $(context.pipelineRun.name)"
+
+        git push origin $(params.gitops-branch)
+        echo "✓ Push GitOps OK → ArgoCD détectera le changement"

@@ -1,0 +1,67 @@
+# Task Tekton : lint Python (ruff + mypy)
+# Lint du dossier pipeline/ et vérification des types
+
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: lint-python
+  namespace: pipeline-cicd
+spec:
+  workspaces:
+    - name: source
+      description: Workspace contenant le code source (cloné par git-clone)
+
+  params:
+    - name: python-version
+      type: string
+      default: "3.11"
+    - name: source-dir
+      type: string
+      default: "pipeline"
+      description: Dossier à analyser (relatif à la racine du workspace)
+
+  steps:
+    - name: install-linters
+      image: python:$(params.python-version)-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        pip install --quiet ruff mypy types-requests
+
+    - name: ruff-check
+      image: python:$(params.python-version)-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        echo "=== Ruff lint : $(params.source-dir)/ ==="
+        ruff check $(params.source-dir)/ \
+          --select=E,F,W,I,UP \
+          --ignore=E501 \
+          --output-format=github
+        echo "✓ Ruff OK"
+
+    - name: ruff-format-check
+      image: python:$(params.python-version)-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        echo "=== Ruff format check ==="
+        ruff format $(params.source-dir)/ --check
+        echo "✓ Format OK"
+
+    - name: mypy-check
+      image: python:$(params.python-version)-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        echo "=== mypy type check : $(params.source-dir)/ ==="
+        mypy $(params.source-dir)/ \
+          --python-version=$(params.python-version) \
+          --ignore-missing-imports \
+          --no-error-summary \
+          --pretty
+        echo "✓ mypy OK"
